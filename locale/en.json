@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Guardian",
+    "description": "Reviews tool calls and agent progress with a separate model. Select the G shield below the composer, choose a reviewer, and turn on the switch. Select the intervention count to open the history and jump to a marked event. While enabled, extra requests send chat context and tool arguments to the selected provider and use its quota. Turning Guardian off stops new reviews without changing DSH permissions.",
+    "detail": "docs/DETAIL.md"
+  }
+}

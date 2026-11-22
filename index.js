@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { inspectAction, inspectCourse } from './review.js';
 import { foldHistory, toolTrigger, registerHistory } from './history.js';
 
-export const inject = ['llm', 'connection', 'sessions', 'sessionProjections'];
+export const inject = ['llm', 'connection', 'sessions', 'sessionProjections', 'fs', 'workingDirectory'];
 
 // Хранит настройки чатов отдельно от истории и атомарно сохраняет каждую редакцию.
 export async function apply(ctx) {
@@ -80,6 +80,28 @@ export async function apply(ctx) {
     courses.delete(id);
   }
 
+  // Пределы содержимого, которое надзорная модель может прочитать из одного скрипта.
+  const SCRIPT_MAX_BYTES = 256 * 1024;
+  const SCRIPT_MAX_CHARS = 60000;
+
+  // Возвращает чтение текстового файла, ограниченное рабочей папкой сессии.
+  async function makeScriptReader(ctx, exec) {
+    const signal = exec.signal;
+    const cwd = exec.agent ? await ctx.workingDirectory.ensure(exec.agent, signal) : undefined;
+    const root = cwd !== undefined ? await ctx.fs.resolve(cwd, {signal}) : undefined;
+    return async (path) => {
+      if (root === undefined) throw Error('Рабочая папка сессии недоступна');
+      const target = await ctx.fs.resolve(path, {cwd, signal});
+      if (!ctx.fs.contains(root, target)) throw Error(`Файл вне рабочей папки: ${path}`);
+      const info = await ctx.fs.stat(target, signal);
+      if (info === undefined) throw Error(`Файл не найден: ${path}`);
+      if (info.type !== 'file') throw Error(`Не файл: ${path}`);
+      if (info.size !== undefined && info.size > SCRIPT_MAX_BYTES) throw Error(`Файл слишком велик для проверки: ${path}`);
+      const text = await ctx.fs.readText(target, signal);
+      return text.length > SCRIPT_MAX_CHARS ? text.slice(0, SCRIPT_MAX_CHARS) + '\n… (обрезано)' : text;
+    };
+  }
+
   // Ограничивает изменение настроек авторизованным интерфейсом DSH и проверяет версию записи.
   async function settings(request, defaults = false) {
     const id = defaults ? '' : new URL(request.url).searchParams.get('session');
@@ -150,7 +172,9 @@ export async function apply(ctx) {
     if (!id || prior.kind === 'deny') return prior;
     const route = state(id);
     if (!route.enabled) return prior;
-    const review = await inspectAction(ctx.llm, route, exec, recorder(id, route));
+    let reader;
+    try { reader = await makeScriptReader(ctx, exec); } catch { reader = undefined; }
+    const review = await inspectAction(ctx.llm, route, exec, recorder(id, route), reader);
     const decision = exec.signal?.aborted || route.revision !== state(id).revision
       ? {kind:'deny', reason:'Проверка Guardian прервана.'} : review;
     if (decision.kind !== 'deny' && (prior.kind === 'ask' || decision.kind === 'allow')) return prior;

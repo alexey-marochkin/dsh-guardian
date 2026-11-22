@@ -1,7 +1,7 @@
 {
   "name": "dsh-guardian",
   "icon": "./icon.svg",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "description": "Надзор за действиями агента в DeepSeek Harness: проверка вызовов инструментов, согласование и история срабатываний.",
   "repository": { "type": "git", "url": "git+https://github.com/alexey-marochkin/dsh-guardian.git" },
   "type": "module",

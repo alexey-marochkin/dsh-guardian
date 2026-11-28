@@ -175,8 +175,15 @@ export async function apply(ctx) {
     let reader;
     try { reader = await makeScriptReader(ctx, exec); } catch { reader = undefined; }
     const review = await inspectAction(ctx.llm, route, exec, recorder(id, route), reader);
-    const decision = exec.signal?.aborted || route.revision !== state(id).revision
-      ? {kind:'deny', reason:'Проверка Guardian прервана.'} : review;
+    let decision;
+    if (exec.signal?.aborted || route.revision !== state(id).revision) {
+      decision = {kind:'deny', reason:'Проверка Guardian прервана.'};
+    } else if (review.kind === 'ask' && ctx.get('approval') === undefined) {
+      // Без канала подтверждения запрос к пользователю превратился бы в ложный отказ пользователя.
+      decision = {kind:'deny', reason:`Guardian запросил подтверждение для вызова "${exec.name}", но канал подтверждения недоступен; действие не выполнено.`};
+    } else {
+      decision = review;
+    }
     if (decision.kind !== 'deny' && (prior.kind === 'ask' || decision.kind === 'allow')) return prior;
     try {
       const current = state(id);

@@ -136,15 +136,20 @@ async function evaluate(llm, route, system, input, signal, onUsage, tools, readF
 }
 
 // Проверяет каждый вызов, включая первый. При отсутствии решения запрашивает человека.
+// Отказ и ошибка Guardian явно помечаются как его решение, а не как отказ пользователя.
 export async function inspectAction(llm, route, exec, onUsage, readFile) {
+  const name = exec.name;
   try {
     if (exec.arguments === undefined || JSON.stringify(exec.arguments).length > 48000) throw Error('Incomplete action');
     const result = await evaluate(llm, route, actionSystem, {history: evidence(exec.agent.session),
       action: {tool: exec.name, arguments: exec.arguments}}, exec.signal, onUsage, READ_TOOLS, readFile);
     if (!['allow', 'ask', 'deny'].includes(result.outcome) || typeof result.rationale !== 'string' || !result.rationale.trim()) throw Error('Invalid verdict');
-    return {kind: result.outcome, reason: result.rationale.slice(0, 1200)};
+    const rationale = result.rationale.trim().slice(0, 1200);
+    if (result.outcome === 'deny') return {kind: 'deny', reason: `Guardian отклонил вызов "${name}": ${rationale}`, info: {name: 'GuardianError', code: 'GUARDIAN_DENIED'}};
+    if (result.outcome === 'ask') return {kind: 'ask', reason: `Guardian запросил подтверждение для вызова "${name}": ${rationale}`};
+    return {kind: 'allow'};
   } catch {
-    return {kind: 'ask', reason: 'Guardian не получил полную оценку действия. Требуется решение пользователя.'};
+    return {kind: 'deny', reason: `Guardian не смог проверить вызов "${name}"; действие не выполнено.`, info: {name: 'GuardianError', code: 'GUARDIAN_FAILED'}};
   }
 }
 

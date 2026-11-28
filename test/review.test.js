@@ -68,5 +68,39 @@ test('Отмена снимает ожидание даже если прова�
   const stalled = {async *stream() { await new Promise(() => {}); }};
   const review = inspectAction(stalled,route,{...exec,signal:controller.signal});
   controller.abort();
-  assert.equal((await review).kind,'deny');
+  const result = await review;
+  assert.equal(result.kind,'deny');
+  assert.match(result.reason,/прервана/);
+});
+// Имитирует терминальную ошибку провайдера в потоке, как это делает адаптер DSH.
+function failing(failure) {
+  return {async *stream() {
+    yield {type:'usage',usage:{inputTokens:0,outputTokens:0,totalTokens:0}};
+    yield {type:'finish',reason:{kind:'error',failure}};
+  }};
+}
+test('Исчерпанный лимит модели надзора сообщается с реальной причиной', async () => {
+  const result = await inspectAction(failing({message:'Codex error: The usage limit has been reached',code:'PI_AI_ERROR'}),route,exec);
+  assert.equal(result.kind,'deny');
+  assert.equal(result.info.code,'GUARDIAN_FAILED');
+  assert.match(result.reason,/исчерпан лимит запросов/);
+  assert.match(result.reason,/usage limit has been reached/);
+  assert.match(result.reason,/Смените модель надзора/);
+});
+test('Ошибка авторизации модели надзора сообщается отдельно', async () => {
+  const result = await inspectAction(failing({message:'401 Unauthorized',code:'INVALID_CREDENTIAL'}),route,exec);
+  assert.match(result.reason,/не удалось авторизоваться/);
+});
+test('Неизвестная ошибка провайдера показывается как есть', async () => {
+  const result = await inspectAction(failing({message:'Codex error: model is not supported',code:'PI_AI_ERROR'}),route,exec);
+  assert.match(result.reason,/ошибка провайдера: Codex error: model is not supported/);
+});
+test('Обрыв потока по таймауту сообщается как отсутствие ответа', async () => {
+  const stalled = {async *stream() { yield {type:'finish',reason:{kind:'aborted',failure:{message:'pi-ai stream aborted',code:'ABORTED'}}}; }};
+  const result = await inspectAction(stalled,route,exec);
+  assert.match(result.reason,/не ответила вовремя/);
+});
+test('Некорректный ответ модели отличается от сбоя провайдера', async () => {
+  const result = await inspectAction(provider('invalid'),route,exec);
+  assert.match(result.reason,/некорректный ответ/);
 });

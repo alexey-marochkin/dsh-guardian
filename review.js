@@ -96,6 +96,8 @@ async function readVerdict(llm, route, system, input, stop, onUsage, tools, read
         if (chunk.type === 'finish') finish = chunk.reason;
       }
       if (finish?.kind === 'stop') return JSON.parse(text.trim());
+      if (finish?.kind === 'error') throw providerError(finish.failure);
+      if (finish?.kind === 'aborted') { const err = Error('Проверка прервана'); err.code = 'ABORTED'; throw err; }
       if (finish?.kind !== 'tool-calls' || calls.length === 0) throw Error('Incomplete review');
       // Собираем ответ модели с вызовами и результаты чтения, чтобы продолжить тот же запрос.
       const assistant = {role: 'assistant', id: randomUUID(), source: {kind: 'model', provider: route.provider, model: route.model}, content: calls};
@@ -135,6 +137,26 @@ async function evaluate(llm, route, system, input, signal, onUsage, tools, readF
   finally { stop.removeEventListener('abort', abort); }
 }
 
+// Сохраняет причину отказа провайдера, чтобы показать её пользователю вместо общего сбоя.
+function providerError(failure) {
+  const message = typeof failure?.message === 'string' && failure.message.trim() ? failure.message.trim() : 'Провайдер модели надзора вернул ошибку';
+  const err = Error(message);
+  err.code = typeof failure?.code === 'string' ? failure.code : 'PROVIDER_ERROR';
+  return err;
+}
+
+// Переводит типовые ошибки провайдера и протокола на язык пользователя.
+function describeCause(err) {
+  const raw = String(err?.message ?? err ?? '').replace(/\s+/g, ' ').trim();
+  const code = typeof err?.code === 'string' ? err.code : '';
+  if (raw === 'Incomplete action') return 'аргументы вызова недоступны или слишком велики для проверки.';
+  if (err?.name === 'TimeoutError' || code === 'ABORTED' || /timed?\s*out|timeout/i.test(raw)) return 'модель надзора не ответила вовремя.';
+  if (code === 'QUOTA_EXCEEDED' || /usage limit|quota|rate.?limit/i.test(raw)) return `у модели надзора исчерпан лимит запросов${raw ? ` (${raw})` : ''}.`;
+  if (code === 'INVALID_CREDENTIAL' || /unauthorized|forbidden|credential|auth/i.test(raw)) return `не удалось авторизоваться у провайдера модели надзора${raw ? ` (${raw})` : ''}.`;
+  if (err instanceof SyntaxError || /^(Incomplete|Oversized|Too many|Invalid) /.test(raw)) return 'модель надзора вернула некорректный ответ.';
+  return raw ? `ошибка провайдера: ${raw.slice(0, 200)}.` : 'неизвестная ошибка.';
+}
+
 // Проверяет каждый вызов, включая первый. При отсутствии решения запрашивает человека.
 // Отказ и ошибка Guardian явно помечаются как его решение, а не как отказ пользователя.
 export async function inspectAction(llm, route, exec, onUsage, readFile) {
@@ -148,8 +170,10 @@ export async function inspectAction(llm, route, exec, onUsage, readFile) {
     if (result.outcome === 'deny') return {kind: 'deny', reason: `Guardian отклонил вызов "${name}": ${rationale}`, info: {name: 'GuardianError', code: 'GUARDIAN_DENIED'}};
     if (result.outcome === 'ask') return {kind: 'ask', reason: `Guardian запросил подтверждение для вызова "${name}": ${rationale}`};
     return {kind: 'allow'};
-  } catch {
-    return {kind: 'deny', reason: `Guardian не смог проверить вызов "${name}"; действие не выполнено.`, info: {name: 'GuardianError', code: 'GUARDIAN_FAILED'}};
+  } catch (err) {
+    if (exec.signal?.aborted) return {kind: 'deny', reason: 'Проверка Guardian прервана.', info: {name: 'GuardianError', code: 'GUARDIAN_FAILED'}};
+    console.warn('[dsh-guardian] Не удалось проверить вызов:', err?.message ?? err);
+    return {kind: 'deny', reason: `Guardian не смог проверить вызов "${name}": ${describeCause(err)} Смените модель надзора в панели Guardian или отключите надзор; действие не выполнено.`, info: {name: 'GuardianError', code: 'GUARDIAN_FAILED'}};
   }
 }
 
